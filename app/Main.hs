@@ -3,7 +3,7 @@
 
 module Main (main) where
 
-import Control.Exception (bracket)
+import Control.Concurrent (forkFinally)
 import Control.Monad (forever)
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BC
@@ -36,18 +36,17 @@ main = do
 
     -- Accept connections and handle them forever
     forever $ do
-        bracket
-            (accept serverSocket)
-            (\(clientSocket, _) -> close clientSocket)
-            handleConnection
+        (clientSocket, clientAddr) <- accept serverSocket
+        handleConnection clientSocket clientAddr
+            `forkFinally` \_ -> close clientSocket
 
-handleConnection :: (Socket, SockAddr) -> IO ()
-handleConnection (clientSocket, clientAddr) = do
+handleConnection :: Socket -> SockAddr -> IO ()
+handleConnection clientSocket clientAddr = do
     BC.putStrLn $ "Accepted connection from " <> BC.pack (show clientAddr) <> "."
 
-    body <- recv clientSocket 4096
+    buffer <- recv clientSocket 4096
 
-    let request = parseRequest body
+    let request = parseRequest buffer
     BC.putStrLn $ BC.pack $ show request
 
     let response = case request of
