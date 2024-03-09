@@ -3,6 +3,7 @@
 
 module Main (main) where
 
+import Control.Exception (bracket)
 import Control.Monad (forM_, forever)
 import Data.ByteString.Char8 qualified as BC
 import Network.Socket
@@ -31,22 +32,33 @@ main = do
     addrInfo <- getAddrInfo Nothing (Just host) (Just port)
 
     serverSocket <- socket (addrFamily $ head addrInfo) Stream defaultProtocol
+
+    -- reuse local address to prevent "resource busy" errors
+    setSocketOption serverSocket ReuseAddr 1
+    withFdSocket serverSocket setCloseOnExecIfNeeded
+
     bind serverSocket $ addrAddress $ head addrInfo
     listen serverSocket 5
 
     -- Accept connections and handle them forever
-    forever $ do
-        (clientSocket, clientAddr) <- accept serverSocket
-        BC.putStrLn $ "Accepted connection from " <> BC.pack (show clientAddr) <> "."
+    forever
+        $ bracket (accept serverSocket) (\(clientSocket, _) -> close clientSocket)
+        $ \(clientSocket, clientAddr) -> do
+            BC.putStrLn $ "Accepted connection from " <> BC.pack (show clientAddr) <> "."
 
-        body <- recv clientSocket 4096
-        let contentLines = BC.strip <$> BC.lines body
-        forM_ contentLines BC.putStrLn
+            body <- recv clientSocket 4096
+            let contentLines = BC.strip <$> BC.lines body
+            BC.putStrLn ""
+            forM_ contentLines BC.putStrLn
 
-        _ <- case BC.words <$> contentLines of
-            ("GET" : "/" : _) : _ ->
-                send clientSocket status200
-            _ ->
-                send clientSocket status404
+            _ <- case BC.words <$> contentLines of
+                ("GET" : "/" : _) : _ -> do
+                    BC.putStrLn "path: /"
+                    sendAll clientSocket status200
+                ("GET" : path : _) : _ -> do
+                    BC.putStrLn $ "path: " <> path
+                    sendAll clientSocket status404
+                _ ->
+                    sendAll clientSocket status404
 
-        close clientSocket
+            close clientSocket
