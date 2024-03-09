@@ -3,11 +3,17 @@
 
 module Main (main) where
 
-import Control.Monad (forever)
+import Control.Monad (forM_, forever)
 import Data.ByteString.Char8 qualified as BC
 import Network.Socket
 import Network.Socket.ByteString
 import System.IO (BufferMode (..), hSetBuffering, stdout)
+
+status200 :: BC.ByteString
+status200 = "HTTP/1.1 200 OK\r\n\r\n"
+
+status404 :: BC.ByteString
+status404 = "HTTP/1.1 404 Not Found\r\n\r\n"
 
 main :: IO ()
 main = do
@@ -32,6 +38,15 @@ main = do
     forever $ do
         (clientSocket, clientAddr) <- accept serverSocket
         BC.putStrLn $ "Accepted connection from " <> BC.pack (show clientAddr) <> "."
-        -- Handle the clientSocket as needed...
-        _ <- send clientSocket "HTTP/1.1 200 OK\r\n\r\n"
+
+        body <- recv clientSocket 4096
+        let contentLines = BC.strip <$> BC.lines body
+        forM_ contentLines BC.putStrLn
+
+        _ <- case BC.words <$> contentLines of
+            ("GET" : "/" : _) : _ ->
+                send clientSocket status200
+            _ ->
+                send clientSocket status404
+
         close clientSocket
