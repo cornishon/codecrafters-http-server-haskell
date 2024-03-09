@@ -6,6 +6,7 @@ module Main (main) where
 import Control.Monad (forever)
 import Data.ByteString.Char8 qualified as BC
 import Network.Socket
+import Network.Socket.ByteString
 import System.IO (BufferMode (..), hSetBuffering, stdout)
 
 main :: IO ()
@@ -32,4 +33,5 @@ main = do
         (clientSocket, clientAddr) <- accept serverSocket
         BC.putStrLn $ "Accepted connection from " <> BC.pack (show clientAddr) <> "."
         -- Handle the clientSocket as needed...
+        _ <- send clientSocket "HTTP/1.1 200 OK\r\n\r\n"
         close clientSocket
