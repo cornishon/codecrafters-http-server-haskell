@@ -4,19 +4,18 @@
 module Main (main) where
 
 import Control.Exception (bracket)
-import Control.Monad (forM_, forever)
+import Control.Monad (forever)
+import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BC
-import Data.Maybe (fromMaybe)
+import Data.Char (toLower)
+import Data.Map qualified as M
 import Network.Socket
-import Network.Socket.ByteString
+import Network.Socket.ByteString (recv, sendAll)
 import System.IO (BufferMode (..), hSetBuffering, stdout)
 
 main :: IO ()
 main = do
     hSetBuffering stdout LineBuffering
-
-    -- You can use print statements as follows for debugging, they'll be visible when running tests.
-    BC.putStrLn "Logs from your program will appear here"
 
     let host = "127.0.0.1"
         port = "4221"
@@ -47,39 +46,82 @@ handleConnection (clientSocket, clientAddr) = do
     BC.putStrLn $ "Accepted connection from " <> BC.pack (show clientAddr) <> "."
 
     body <- recv clientSocket 4096
-    let contentLines = BC.strip <$> BC.lines body
-    BC.putStrLn ""
-    forM_ contentLines BC.putStrLn
 
-    let response = case BC.words <$> contentLines of
-            ("GET" : "/" : _) : _ -> do
-                mkResponse Status200 [] ""
-            ("GET" : path : _) : _ ->
-                if "/echo/" `BC.isPrefixOf` path
-                    then echoResponse (BC.drop 6 path)
-                    else mkResponse Status404 [] ""
+    let request = parseRequest body
+    BC.putStrLn $ BC.pack $ show request
+
+    let response = case request of
+            Just (Request "GET" path headers)
+                | path == "/" ->
+                    fromStatus Status200
+                | "/echo" `BC.isPrefixOf` path ->
+                    plainText (BC.drop 6 path)
+                | path == "/user-agent"
+                , Just userAgent <- M.lookup "user-agent" headers ->
+                    plainText userAgent
+                | otherwise ->
+                    fromStatus Status404
             _ ->
-                mkResponse Status404 [] ""
+                fromStatus Status400
 
-    sendAll clientSocket response
+    sendAll clientSocket (renderResponse response)
 
 data StatusCode
     = Status200
+    | Status400
     | Status404
+    deriving (Show)
 
-toByteString :: StatusCode -> BC.ByteString
-toByteString Status200 = "200 OK"
-toByteString Status404 = "404 Not Found"
+renderStatus :: StatusCode -> ByteString
+renderStatus Status200 = "200 OK"
+renderStatus Status400 = "400 Bad Request"
+renderStatus Status404 = "404 Not Found"
 
-mkResponse :: StatusCode -> [BC.ByteString] -> BC.ByteString -> BC.ByteString
-mkResponse status headers body =
-    "HTTP/1.1 " <> toByteString status <> "\r\n" <> BC.intercalate "\r\n" headers <> "\r\n\r\n" <> body
+type HeaderMap = M.Map ByteString ByteString
 
-echoResponse :: BC.ByteString -> BC.ByteString
-echoResponse msg =
-    mkResponse
-        Status200
-        [ "Content-Type: text/plain"
-        , "Content-Length: " <> (BC.pack . show . BC.length) msg
-        ]
-        msg
+data Response = Response
+    { resCode :: StatusCode
+    , resHeaders :: HeaderMap
+    , resBody :: ByteString
+    }
+    deriving (Show)
+
+renderResponse :: Response -> ByteString
+renderResponse (Response status headerMap body) =
+    let headers = (\(k, v) -> k <> ":" <> v) <$> M.toList headerMap
+     in "HTTP/1.1 " <> renderStatus status <> "\r\n" <> BC.intercalate "\r\n" headers <> "\r\n\r\n" <> body
+
+fromStatus :: StatusCode -> Response
+fromStatus code = Response code M.empty ""
+
+plainText :: ByteString -> Response
+plainText msg = Response Status200 headers msg
+  where
+    msgLength = (BC.pack . show . BC.length) msg
+    headers = M.fromList [("Content-Type", "text/plain"), ("Content-Length", msgLength)]
+
+data Request = Request
+    { reqMethod :: ByteString
+    , reqPath :: ByteString
+    , reqHeaders :: HeaderMap
+    }
+    deriving (Show)
+
+parseRequest :: ByteString -> Maybe Request
+parseRequest content = do
+    let (startLine, headerMap) = BC.breakSubstring "\r\n" content
+    (method, path) <- case BC.words startLine of
+        [m, p, _] -> Just (m, p)
+        _ -> Nothing
+    pure $ Request method path (parseHeaders headerMap)
+
+parseHeaders :: ByteString -> HeaderMap
+parseHeaders hs = go (breakLine hs) M.empty
+  where
+    breakLine = BC.breakSubstring "\r\n" . BC.strip
+    go ("", _) acc = acc
+    go (kv, rest) acc =
+        let (k, v) = BC.break (== ':') kv
+            k' = BC.map toLower (BC.strip k)
+            v' = BC.strip (BC.drop 1 v)
+         in go (breakLine rest) (M.insert k' v' acc)
