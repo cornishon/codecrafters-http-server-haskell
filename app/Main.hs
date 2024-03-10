@@ -13,7 +13,8 @@ import Network.Socket
 import Network.Socket.ByteString (recv, sendAll)
 import System.Directory (doesFileExist)
 import System.Environment (getArgs)
-import System.IO (BufferMode (..), IOMode (ReadMode), hSetBuffering, openBinaryFile, stdout)
+import System.IO (BufferMode (..), hSetBuffering, stdout)
+import Text.Read (readMaybe)
 
 getDirectoryfromArgs :: IO (Maybe FilePath)
 getDirectoryfromArgs = do
@@ -62,7 +63,7 @@ handleConnection clientSocket clientAddr maybeDir = do
     BC.putStrLn $ BC.pack $ show request
 
     response <- case request of
-        Just (Request "GET" path headers)
+        Just (Request "GET" path headers _body)
             | "/" == path ->
                 pure $ fromStatus Status200
             | "/echo/" `BC.isPrefixOf` path ->
@@ -72,14 +73,19 @@ handleConnection clientSocket clientAddr maybeDir = do
                 let filepath = dir <> "/" <> BC.unpack (BC.drop 7 path)
                 exists <- doesFileExist filepath
                 if exists
-                    then do
-                        h <- openBinaryFile filepath ReadMode
-                        contents <- BC.hGetContents h
-                        pure $ octetStream contents
+                    then octetStream <$> BC.readFile filepath
                     else pure $ fromStatus Status404
             | "/user-agent" == path
             , Just userAgent <- M.lookup "user-agent" headers ->
                 pure $ plainText userAgent
+            | otherwise ->
+                pure $ fromStatus Status404
+        Just (Request "POST" path _headers body)
+            | "/files/" `BC.isPrefixOf` path
+            , Just dir <- maybeDir -> do
+                let filepath = dir <> "/" <> BC.unpack (BC.drop 7 path)
+                BC.writeFile filepath body
+                pure $ fromStatus Status201
             | otherwise ->
                 pure $ fromStatus Status404
         _ ->
@@ -89,12 +95,14 @@ handleConnection clientSocket clientAddr maybeDir = do
 
 data StatusCode
     = Status200
+    | Status201
     | Status400
     | Status404
     deriving (Show)
 
 renderStatus :: StatusCode -> ByteString
 renderStatus Status200 = "200 OK"
+renderStatus Status201 = "201 Created"
 renderStatus Status400 = "400 Bad Request"
 renderStatus Status404 = "404 Not Found"
 
@@ -131,6 +139,7 @@ data Request = Request
     { reqMethod :: ByteString
     , reqPath :: ByteString
     , reqHeaders :: HeaderMap
+    , reqBody :: ByteString
     }
     deriving (Show)
 
@@ -140,13 +149,19 @@ parseRequest content = do
     (method, path) <- case BC.words startLine of
         [m, p, _] -> Just (m, p)
         _ -> Nothing
-    pure $ Request method path (parseHeaders headerMap)
+    let (headers, rest) = parseHeaders headerMap
+    body <- case M.lookup "content-length" headers of
+        Just len -> do
+            n <- readMaybe (BC.unpack len)
+            pure $ BC.take n rest
+        Nothing -> pure rest
+    pure $ Request method path headers body
 
-parseHeaders :: ByteString -> HeaderMap
+parseHeaders :: ByteString -> (HeaderMap, ByteString)
 parseHeaders hs = go (breakLine hs) M.empty
   where
     breakLine = BC.breakSubstring "\r\n" . BC.strip
-    go ("", _) acc = acc
+    go ("", body) acc = (acc, body)
     go (kv, rest) acc =
         let (k, v) = BC.break (== ':') kv
             k' = BC.map toLower (BC.strip k)
