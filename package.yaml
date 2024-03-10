@@ -23,6 +23,7 @@ ghc-options:
 dependencies:
   - base >= 4.7 && < 5
   - containers
+  - directory
   - network # establish a simple TCP network
   - bytestring # useful to send bytes over the network
 

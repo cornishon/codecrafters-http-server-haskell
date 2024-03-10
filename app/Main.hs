@@ -11,10 +11,22 @@ import Data.Char (toLower)
 import Data.Map qualified as M
 import Network.Socket
 import Network.Socket.ByteString (recv, sendAll)
-import System.IO (BufferMode (..), hSetBuffering, stdout)
+import System.Directory (doesFileExist)
+import System.Environment (getArgs)
+import System.IO (BufferMode (..), IOMode (ReadMode), hSetBuffering, openBinaryFile, stdout)
+
+getDirectoryfromArgs :: IO (Maybe FilePath)
+getDirectoryfromArgs = do
+    args <- getArgs
+    case args of
+        ["--directory", dir] -> pure $ Just dir
+        _ -> pure Nothing
 
 main :: IO ()
 main = do
+    directory <- getDirectoryfromArgs
+    BC.putStrLn $ "directory: " <> BC.pack (show directory)
+
     hSetBuffering stdout LineBuffering
 
     let host = "127.0.0.1"
@@ -37,11 +49,11 @@ main = do
     -- Accept connections and handle them forever
     forever $ do
         (clientSocket, clientAddr) <- accept serverSocket
-        handleConnection clientSocket clientAddr
+        handleConnection clientSocket clientAddr directory
             `forkFinally` \_ -> close clientSocket
 
-handleConnection :: Socket -> SockAddr -> IO ()
-handleConnection clientSocket clientAddr = do
+handleConnection :: Socket -> SockAddr -> Maybe FilePath -> IO ()
+handleConnection clientSocket clientAddr maybeDir = do
     BC.putStrLn $ "Accepted connection from " <> BC.pack (show clientAddr) <> "."
 
     buffer <- recv clientSocket 4096
@@ -49,19 +61,29 @@ handleConnection clientSocket clientAddr = do
     let request = parseRequest buffer
     BC.putStrLn $ BC.pack $ show request
 
-    let response = case request of
-            Just (Request "GET" path headers)
-                | path == "/" ->
-                    fromStatus Status200
-                | "/echo" `BC.isPrefixOf` path ->
-                    plainText (BC.drop 6 path)
-                | path == "/user-agent"
-                , Just userAgent <- M.lookup "user-agent" headers ->
-                    plainText userAgent
-                | otherwise ->
-                    fromStatus Status404
-            _ ->
-                fromStatus Status400
+    response <- case request of
+        Just (Request "GET" path headers)
+            | "/" == path ->
+                pure $ fromStatus Status200
+            | "/echo/" `BC.isPrefixOf` path ->
+                pure $ plainText (BC.drop 6 path)
+            | "/files/" `BC.isPrefixOf` path
+            , Just dir <- maybeDir -> do
+                let filepath = dir <> "/" <> BC.unpack (BC.drop 7 path)
+                exists <- doesFileExist filepath
+                if exists
+                    then do
+                        h <- openBinaryFile filepath ReadMode
+                        contents <- BC.hGetContents h
+                        pure $ octetStream contents
+                    else pure $ fromStatus Status404
+            | "/user-agent" == path
+            , Just userAgent <- M.lookup "user-agent" headers ->
+                pure $ plainText userAgent
+            | otherwise ->
+                pure $ fromStatus Status404
+        _ ->
+            pure $ fromStatus Status400
 
     sendAll clientSocket (renderResponse response)
 
@@ -98,6 +120,12 @@ plainText msg = Response Status200 headers msg
   where
     msgLength = (BC.pack . show . BC.length) msg
     headers = M.fromList [("Content-Type", "text/plain"), ("Content-Length", msgLength)]
+
+octetStream :: ByteString -> Response
+octetStream content = Response Status200 headers content
+  where
+    contentLen = (BC.pack . show . BC.length) content
+    headers = M.fromList [("Content-Type", "application/octet-stream"), ("Content-Length", contentLen)]
 
 data Request = Request
     { reqMethod :: ByteString
