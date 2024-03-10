@@ -8,6 +8,7 @@ import Control.Monad (forever)
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BC
 import Data.Char (toLower)
+import Data.Functor (($>))
 import Data.Map qualified as M
 import Network.Socket
 import Network.Socket.ByteString (recv, sendAll)
@@ -84,8 +85,7 @@ handleConnection clientSocket clientAddr maybeDir = do
             | "/files/" `BC.isPrefixOf` path
             , Just dir <- maybeDir -> do
                 let filepath = dir <> "/" <> BC.unpack (BC.drop 7 path)
-                BC.writeFile filepath body
-                pure $ fromStatus Status201
+                BC.writeFile filepath body $> fromStatus Status201
             | otherwise ->
                 pure $ fromStatus Status404
         _ ->
@@ -145,7 +145,7 @@ data Request = Request
 
 parseRequest :: ByteString -> Maybe Request
 parseRequest content = do
-    let (startLine, headerMap) = BC.breakSubstring "\r\n" content
+    let (startLine, headerMap) = breakLine content
     (method, path) <- case BC.words startLine of
         [m, p, _] -> Just (m, p)
         _ -> Nothing
@@ -160,10 +160,14 @@ parseRequest content = do
 parseHeaders :: ByteString -> (HeaderMap, ByteString)
 parseHeaders hs = go (breakLine hs) M.empty
   where
-    breakLine = BC.breakSubstring "\r\n" . BC.strip
     go ("", body) acc = (acc, body)
     go (kv, rest) acc =
         let (k, v) = BC.break (== ':') kv
             k' = BC.map toLower (BC.strip k)
             v' = BC.strip (BC.drop 1 v)
          in go (breakLine rest) (M.insert k' v' acc)
+
+breakLine :: ByteString -> (ByteString, ByteString)
+breakLine s =
+    let (line, rest) = BC.breakSubstring "\r\n" s
+     in (line, BC.drop 2 rest)
